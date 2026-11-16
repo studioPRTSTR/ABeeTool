@@ -43,6 +43,7 @@ enum HandleKind
     AddRow,
     Menu,
     SubText,
+    ExtendRow,
 }
 
 
@@ -78,6 +79,7 @@ class ChainHandle
 
     public System.Drawing.Color Color =>
         Kind == HandleKind.SubText ? System.Drawing.Color.FromArgb(230, 140, 30)
+        : Kind == HandleKind.ExtendRow ? System.Drawing.Color.FromArgb(40, 150, 80)
         : Kind == HandleKind.Menu ? System.Drawing.Color.FromArgb(40, 40, 40)
         : Kind == HandleKind.MovePoint ? System.Drawing.Color.FromArgb(40, 150, 80)
         : Kind == HandleKind.RemovePoint ? System.Drawing.Color.FromArgb(200, 60, 50)
@@ -150,6 +152,11 @@ static class AATDim
     static bool LastRowOverall = true;
 
     static readonly string[] DirectionNames = { "Auto", "Horizontal", "Vertical", "Aligned" };
+
+    // One style per drawing scale, e.g. "AAT_Bemassung_1-50". Same paper sizes, only DimensionScale differs.
+    static readonly int[] Scales = { 100, 50, 25 };
+    static readonly string[] ScaleNames = { "1_100", "1_50", "1_25" };
+    static int ScaleIndex = -1;   // last chosen scale in this session, -1 = from model_space_scale
 
     // Set while the watcher runs, so all its changes land in one lazily opened undo record.
     static RhinoDoc UndoDoc;
@@ -249,31 +256,61 @@ static class AATDim
     }
 
 
-    public static DimensionStyle FindStyle(RhinoDoc doc)
+    static string StyleNameFor(int scale) => StyleName + "_1-" + scale.ToString(CultureInfo.InvariantCulture);
+
+
+    static DimensionStyle FindStyleByName(RhinoDoc doc, string name)
     {
-        DimensionStyle style = doc.DimStyles.FindName(StyleName);
+        DimensionStyle style = doc.DimStyles.FindName(name);
         return style != null && !style.IsDeleted ? style : null;
     }
+
+
+    static int DefaultScaleIndex()
+    {
+        if (ScaleIndex >= 0)
+            return ScaleIndex;
+        int i = Array.IndexOf(Scales, (int)Math.Round(ModelSpaceScale));
+        return i >= 0 ? i : 1;
+    }
+
+
+    // All AATDim styles in the document: one per scale, plus the old single style of earlier versions.
+    static List<DimensionStyle> AatStyles(RhinoDoc doc) =>
+        Scales.Select(s => FindStyleByName(doc, StyleNameFor(s)))
+            .Concat(new[] { FindStyleByName(doc, StyleName) })
+            .Where(s => s != null)
+            .ToList();
+
+
+    // The style of the current scale if it exists, else any AATDim style.
+    public static DimensionStyle FindStyle(RhinoDoc doc) =>
+        FindStyleByName(doc, StyleNameFor(Scales[DefaultScaleIndex()])) ?? AatStyles(doc).FirstOrDefault();
 
 
     static double MmToModel(RhinoDoc doc) => RhinoMath.UnitScale(UnitSystem.Millimeters, doc.ModelUnitSystem);
 
 
-    // Creates the style from the config, or resets it when reset is true. Makes it the current style.
-    static DimensionStyle EnsureStyle(RhinoDoc doc, bool reset)
+    // Creates the style of one scale from the config, or resets it when reset is true.
+    static DimensionStyle EnsureStyle(RhinoDoc doc, int scale, bool reset, bool makeCurrent)
     {
-        DimensionStyle existing = FindStyle(doc);
+        string name = StyleNameFor(scale);
+        DimensionStyle existing = FindStyleByName(doc, name);
         if (existing != null && !reset)
+        {
+            if (makeCurrent)
+                doc.DimStyles.SetCurrent(existing.Index, false);
             return existing;
+        }
 
         double mm = MmToModel(doc);
         var st = new DimensionStyle();
         st.CopyFrom(existing ?? doc.DimStyles.Current);
-        st.Name = StyleName;
+        st.Name = name;
 
         // Sizes are paper sizes in model units; DimensionScale enlarges them in model space.
         st.TextHeight = TextHeightMm * mm;
-        st.DimensionScale = ModelSpaceScale;
+        st.DimensionScale = scale;
         st.TextGap = TextGapMm * mm;
         st.ArrowType1 = DimensionStyle.ArrowType.Tick;
         st.ArrowType2 = DimensionStyle.ArrowType.Tick;
@@ -320,9 +357,10 @@ static class AATDim
         if (index < 0)
             return null;
 
-        doc.DimStyles.SetCurrent(index, false);
+        if (makeCurrent)
+            doc.DimStyles.SetCurrent(index, false);
         if (!doc.ModelSpaceAnnotationScalingEnabled)
-            RhinoApp.WriteLine("AATDim: model space annotation scaling is off - the style scale {0} only applies when it is on.", ModelSpaceScale);
+            RhinoApp.WriteLine("AATDim: model space annotation scaling is off - the style scale 1:{0} only applies when it is on.", scale);
         return doc.DimStyles[index];
     }
 
@@ -385,11 +423,7 @@ static class AATDim
     }
 
 
-    static bool IsAatStyle(RhinoDoc doc, Guid styleId)
-    {
-        DimensionStyle style = FindStyle(doc);
-        return style != null && style.Id == styleId;
-    }
+    static bool IsAatStyle(RhinoDoc doc, Guid styleId) => AatStyles(doc).Any(s => s.Id == styleId);
 
 
     // ------------------------------------------------------------------ document changes
@@ -719,7 +753,7 @@ static class AATDim
         UndoSerial = 0;
         try
         {
-            DimensionStyle aat = FindStyle(doc);
+            List<DimensionStyle> aat = AatStyles(doc);
             var chains = new HashSet<Tuple<int, string>>();
 
             foreach (Guid id in old.Keys.Union(added).ToList())
@@ -729,8 +763,12 @@ static class AATDim
                     continue;
                 if (ChainKey(obj, out int group, out string tag))
                     chains.Add(Tuple.Create(group, tag));
-                else if (aat != null && dim.DimensionStyleId == aat.Id)
-                    FormatInDoc(doc, id, aat);
+                else
+                {
+                    DimensionStyle style = aat.FirstOrDefault(s => s.Id == dim.DimensionStyleId);
+                    if (style != null)
+                        FormatInDoc(doc, id, style);
+                }
             }
 
             foreach (var key in chains)
@@ -1015,7 +1053,7 @@ static class AATDim
 
             if (!viewport.GetWorldToScreenScale(chain.Frame.Origin, out double pixelsPerUnit) || pixelsPerUnit <= 0.0)
                 continue;
-            double side = all.Min(chain.Along) - 22.0 / pixelsPerUnit;
+            double side = all.Min(chain.Along) - 40.0 / pixelsPerUnit;
 
             // One move handle per measure point, at the point itself (shared by all rows).
             var seen = new List<double>();
@@ -1039,6 +1077,18 @@ static class AATDim
                 if (chain.Rows.Count > 1)
                     handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.DeleteRow, row.Index, side,
                         chain.Frame.PointAt(side, row.Offset)));
+
+                // "+" just beyond both ends of the row: add one more point there.
+                if (row.Points.Count > 0)
+                {
+                    double startAlong = chain.Along(row.Points[0]);
+                    double endAlong = chain.Along(row.Points[row.Points.Count - 1]);
+                    double gap = 16.0 / pixelsPerUnit;
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, startAlong,
+                        chain.Frame.PointAt(startAlong - gap, row.Offset)));
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, endAlong,
+                        chain.Frame.PointAt(endAlong + gap, row.Offset)));
+                }
             }
 
             // "+" right next to each dimension text: add / edit the text below that dimension.
@@ -1149,6 +1199,55 @@ static class AATDim
     }
 
 
+    // Extends a row beyond the end that was clicked: pick points one after another, Enter when done.
+    // Changes chain; false when nothing was added.
+    static bool PickExtendPoints(RhinoDoc doc, DimChain chain, DimensionStyle style, ChainHandle h)
+    {
+        ChainRow row = chain.Rows.FirstOrDefault(r => r.Index == h.Row);
+        if (row == null || row.Points.Count == 0)
+            return false;
+        double tol = Tol(doc);
+        Point3d end = row.Points.OrderBy(p => Math.Abs(chain.Along(p) - h.Along)).First();
+        int added = 0;
+
+        bool wasBusy = DimWatcher.Busy;
+        DimWatcher.Busy = true;
+        try
+        {
+            while (true)
+            {
+                var gp = new GetPoint();
+                gp.SetCommandPrompt(added == 0 ? "Next point of the row" : "Next point of the row (Enter when done)");
+                gp.AcceptNothing(true);
+                gp.SetBasePoint(end, true);
+                gp.DrawLineFromPoint(end, true);
+                gp.DynamicDraw += (sender, e) =>
+                {
+                    DimChain preview = CloneChain(chain);
+                    ChainRow pr = preview.Rows.First(r => r.Index == h.Row);
+                    pr.Points.Add(e.CurrentPoint);
+                    NormalizeRow(preview, pr, tol);
+                    DrawPreview(e, PreviewDims(preview, style));
+                };
+
+                if (gp.Get() != GetResult.Point)
+                    break;
+                Point3d p = gp.Point();
+                int before = row.Points.Count;
+                row.Points.Add(p);
+                NormalizeRow(chain, row, tol);
+                if (row.Points.Count > before)
+                {
+                    added++;
+                    end = chain.Frame.ClosestPoint(p);
+                }
+            }
+        }
+        finally { DimWatcher.Busy = wasBusy; }
+        return added > 0;
+    }
+
+
     // Chain menu: distance between the dimension lines and a text below each dimension.
     static void ShowMenu(RhinoDoc doc, List<RhinoObject> objs, DimChain chain, DimensionStyle style, ChainHandle h)
     {
@@ -1162,7 +1261,7 @@ static class AATDim
         {
             Value = Math.Round(current / paperMm, 1),
             MinValue = 1.0,
-            MaxValue = 100.0,
+            MaxValue = 1000.0,
             DecimalPlaces = 1,
             Increment = 0.5,
             Width = 90,
@@ -1322,6 +1421,10 @@ static class AATDim
                 if (!PickMovedPoint(doc, chain, style, h))
                     return;
                 break;
+            case HandleKind.ExtendRow:
+                if (!PickExtendPoints(doc, chain, style, h))
+                    return;
+                break;
             case HandleKind.RemovePoint:
                 if (row == null || row.Points.Count < 3)
                     return;
@@ -1364,12 +1467,14 @@ static class AATDim
         DimWatcher.Install();
 
         int dirIndex = 0;
+        int scaleIndex = DefaultScaleIndex();
         var optRows = new OptionInteger(DefaultRows, 1, 9);
         Point3d first;
         while (true)
         {
             var gp = new GetPoint();
             gp.SetCommandPrompt("First point of the dimension chain");
+            int optScale = gp.AddOptionList("Scale", ScaleNames, scaleIndex);
             gp.AddOptionInteger("Rows", ref optRows, "Number of dimension rows");
             int optDir = gp.AddOptionList("Direction", DirectionNames, dirIndex);
             int optEdit = gp.AddOption("Edit");
@@ -1380,6 +1485,12 @@ static class AATDim
             if (res == GetResult.Option)
             {
                 int index = gp.OptionIndex();
+                if (index == optScale)
+                {
+                    scaleIndex = gp.Option().CurrentListOptionIndex;
+                    ScaleIndex = scaleIndex;
+                    continue;
+                }
                 if (index == optDir)
                 {
                     dirIndex = gp.Option().CurrentListOptionIndex;
@@ -1398,9 +1509,14 @@ static class AATDim
                 if (index == optStyle)
                 {
                     DimWatcher.Busy = true;
-                    try { EnsureStyle(doc, true); }
+                    try
+                    {
+                        for (int i = 0; i < Scales.Length; i++)
+                            EnsureStyle(doc, Scales[i], true, i == scaleIndex);
+                    }
                     finally { DimWatcher.Busy = false; }
-                    RhinoApp.WriteLine("AATDim: style '{0}' reset from {1} and set current.", StyleName, ConfigFilename);
+                    RhinoApp.WriteLine("AATDim: styles {0} reset from {1}, '{2}' set current.",
+                        string.Join(", ", Scales.Select(s => "'" + StyleNameFor(s) + "'")), ConfigFilename, StyleNameFor(Scales[scaleIndex]));
                     UpdateAll(doc);
                     continue;
                 }
@@ -1412,14 +1528,23 @@ static class AATDim
             break;
         }
 
-        // The style is only created when a chain is drawn, so Update at startup leaves files untouched.
-        DimensionStyle style;
+        // The styles are only created when a chain is drawn, so Update at startup leaves files untouched.
+        // All three are created together, so they are ready in the style list; the chosen one becomes current.
+        DimensionStyle style = null;
         DimWatcher.Busy = true;
-        try { style = EnsureStyle(doc, false); }
+        try
+        {
+            for (int i = 0; i < Scales.Length; i++)
+            {
+                DimensionStyle st = EnsureStyle(doc, Scales[i], false, i == scaleIndex);
+                if (i == scaleIndex)
+                    style = st;
+            }
+        }
         finally { DimWatcher.Busy = false; }
         if (style == null)
         {
-            RhinoApp.WriteLine("AATDim: could not create dimension style '{0}'.", StyleName);
+            RhinoApp.WriteLine("AATDim: could not create dimension style '{0}'.", StyleNameFor(Scales[scaleIndex]));
             return;
         }
 
@@ -1613,23 +1738,23 @@ static class AATDim
     }
 
 
-    // Re-applies the cm / m format to every dimension that uses the style.
+    // Re-applies the cm / m format to every dimension that uses one of the AATDim styles.
     static void UpdateAll(RhinoDoc doc)
     {
-        DimensionStyle style = FindStyle(doc);
-        if (style == null)
+        Dictionary<Guid, DimensionStyle> styles = AatStyles(doc).ToDictionary(s => s.Id);
+        if (styles.Count == 0)
             return;
-        var ids = doc.Objects.GetObjectList(ObjectType.Annotation)
-            .Where(o => o.Geometry is LinearDimension dim && dim.DimensionStyleId == style.Id)
-            .Select(o => o.Id)
+        var dims = doc.Objects.GetObjectList(ObjectType.Annotation)
+            .Where(o => o.Geometry is LinearDimension dim && styles.ContainsKey(dim.DimensionStyleId))
+            .Select(o => Tuple.Create(o.Id, styles[((LinearDimension)o.Geometry).DimensionStyleId]))
             .ToList();
 
         DimWatcher.Busy = true;
         uint undo = doc.BeginUndoRecord("AATDim update");
         try
         {
-            foreach (Guid id in ids)
-                FormatInDoc(doc, id, style);
+            foreach (var d in dims)
+                FormatInDoc(doc, d.Item1, d.Item2);
         }
         finally
         {
@@ -1637,7 +1762,7 @@ static class AATDim
             DimWatcher.Busy = false;
         }
         doc.Views.Redraw();
-        RhinoApp.WriteLine("AATDim: {0} dimension(s) with style '{1}' checked. Edit watcher is on for this session.", ids.Count, StyleName);
+        RhinoApp.WriteLine("AATDim: {0} dimension(s) with AATDim styles checked. Edit watcher is on for this session.", dims.Count);
     }
 }
 

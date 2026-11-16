@@ -32,7 +32,7 @@ Options: `Spacing` (0 = auto), `Corner` (`Miter`, `ButtIncoming`, `ButtOutgoing`
 
 ![AATDim chain and its buttons](docs/aatdim-chain.svg)
 
-1. Run `AATDim` and set `Rows`.
+1. Run `AATDim`, set `Scale` (`1_100`, `1_50`, `1_25`) and `Rows`.
 2. Pick the points, press **Enter**.
 3. Click where the first dimension line goes.
 
@@ -41,13 +41,16 @@ Every row gets all points; the last row is the overall dimension.
 **Buttons on a selected chain**
 
 - **`<>`** move a measure point (in every row)
+- **`+`** (green) at both ends of a row – extend the row with more points, **Enter** when done
 - **`x`** remove a point from a row
 - **`-`** delete a row
 - **`+`** add a row
 - **`+` / `T`** (orange) add or edit a text below a dimension, e.g. `RPH 2.10`
 - **`...`** chain menu: row spacing and texts below
 
-Dimensions are normal Rhino dimensions with the style `AAT_Bemassung`, grouped per chain. Moving a point or a dimension line updates the whole chain. To keep this active from the start, add `AATDim _Update` to *Options → General → Run these commands every time Rhino starts*.
+**Styles**: `AAT_Bemassung_1-100`, `AAT_Bemassung_1-50`, `AAT_Bemassung_1-25` – Arial, ticks, 2 mm text on paper. The chosen one becomes current, so `_Dim` uses it too.
+
+Dimensions are normal Rhino dimensions, grouped per chain. Moving a point or a dimension line updates the whole chain. To keep this active from the start, add `AATDim _Update` to *Options → General → Run these commands every time Rhino starts*.
 
 ---
 
