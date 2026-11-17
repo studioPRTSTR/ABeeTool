@@ -15,7 +15,7 @@ using Rhino.Input;
 using Rhino.Input.Custom;
 
 
-SoftInsulation.Run(RhinoDoc.ActiveDoc);
+BattInsulationLine.Run(RhinoDoc.ActiveDoc);
 
 
 enum CornerMode
@@ -41,10 +41,10 @@ struct CutLine
 }
 
 
-static class SoftInsulation
+static class BattInsulationLine
 {
     const string PluginName = "ArchitecturalAtelierTools";
-    const string ConfigFilename = "SoftInsulation.json";
+    const string ConfigFilename = "BattInsulationLine.json";
 
     static string LayerName = "A_Isolation_01";
     static double DefaultWidth = 0.5;
@@ -67,7 +67,7 @@ static class SoftInsulation
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), PluginName, ConfigFilename);
 
         string assemblyDir = null;
-        try { assemblyDir = Path.GetDirectoryName(typeof(SoftInsulation).Assembly.Location); } catch (Exception) { }
+        try { assemblyDir = Path.GetDirectoryName(typeof(BattInsulationLine).Assembly.Location); } catch (Exception) { }
         if (!string.IsNullOrEmpty(assemblyDir))
             yield return Path.Combine(assemblyDir, ConfigFilename);
 
@@ -303,7 +303,7 @@ static class SoftInsulation
 
         double thetaDeg = RhinoMath.ToDegrees(theta);
         if (thetaDeg < SharpAngleDeg)
-            RhinoApp.WriteLine("SoftInsulation: very sharp corner ({0:0.#} deg) at {1} - miter tip is capped.", thetaDeg, p1);
+            RhinoApp.WriteLine("BattInsulationLine: very sharp corner ({0:0.#} deg) at {1} - miter tip is capped.", thetaDeg, p1);
 
         if (debugLines != null)
         {
@@ -369,7 +369,7 @@ static class SoftInsulation
                          out endOfA, out startOfB, debugLines);
                 return;
             }
-            RhinoApp.WriteLine("SoftInsulation: no butt joint possible at {0} ({1:0.#} deg) - using miter.", p1, thetaDeg);
+            RhinoApp.WriteLine("BattInsulationLine: no butt joint possible at {0} ({1:0.#} deg) - using miter.", p1, thetaDeg);
         }
 
         MiterCuts(p1, tanIn, tanOut, halfWidth, out endOfA, out startOfB, debugLines);
@@ -506,7 +506,7 @@ static class SoftInsulation
 
         if (length < reachStart + reachEnd)
             RhinoApp.WriteLine(
-                "SoftInsulation: segment at {0} is shorter than its two cuts reach ({1:0.###} < {2:0.###}) - the corner may look approximate.",
+                "BattInsulationLine: segment at {0} is shorter than its two cuts reach ({1:0.###} < {2:0.###}) - the corner may look approximate.",
                 seg.PointAtStart, length, reachStart + reachEnd);
 
         int jMin = (int)Math.Floor((phase + sMin) / spacing);
@@ -652,23 +652,23 @@ static class SoftInsulation
             spacing = width / (2.0 + Sqrt3);
         if (spacing >= width)
         {
-            RhinoApp.WriteLine("SoftInsulation: spacing ({0}) must be smaller than the width ({1}).", spacing, width);
+            RhinoApp.WriteLine("BattInsulationLine: spacing ({0}) must be smaller than the width ({1}).", spacing, width);
             return;
         }
 
         List<Line> debugLines = debugDraw ? new List<Line>() : null;
         if (debugDraw)
-            RhinoApp.WriteLine("SoftInsulation debug: width={0}, spacing={1}, loop radius={2:0.####}",
+            RhinoApp.WriteLine("BattInsulationLine debug: width={0}, spacing={1}, loop radius={2:0.####}",
                                width, spacing, 0.5 * width - (width * width - spacing * spacing) / (4.0 * width));
 
         List<Arc> arcs = BuildPattern(path, width, spacing, trimCrossing, continuousRhythm, cornerMode, debugLines);
         if (arcs.Count == 0)
         {
-            RhinoApp.WriteLine("SoftInsulation: could not build the loop chain.");
+            RhinoApp.WriteLine("BattInsulationLine: could not build the loop chain.");
             return;
         }
 
-        uint undoRecord = doc.BeginUndoRecord("Soft insulation");
+        uint undoRecord = doc.BeginUndoRecord("Batt insulation line");
         try
         {
             int layerIndex = EnsureLayer(doc, LayerName, System.Drawing.Color.FromArgb(255, 120, 170, 255));
@@ -703,6 +703,6 @@ static class SoftInsulation
 
         doc.Views.Redraw();
 
-        RhinoApp.WriteLine("SoftInsulation: loop chain added on layer '{0}'.", LayerName);
+        RhinoApp.WriteLine("BattInsulationLine: loop chain added on layer '{0}'.", LayerName);
     }
 }

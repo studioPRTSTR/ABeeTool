@@ -1,7 +1,8 @@
 {
     "layer_name": "A_Bemassung_01",
-    "style_name": "AAT_Bemassung",
-    "text_height_mm": 2.0,
+    "style_name": "Dimension",
+    "font": "Arial Narrow",
+    "text_height": 0.2,
     "model_space_scale": 50,
     "meter_threshold": 1.0,
     "cm_decimals": 0,

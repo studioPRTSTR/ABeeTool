@@ -16,7 +16,7 @@ using Rhino.Input;
 using Rhino.Input.Custom;
 
 
-AATDim.Run(RhinoDoc.ActiveDoc);
+DimensionTool.Run(RhinoDoc.ActiveDoc);
 
 
 enum ChainDirection
@@ -44,6 +44,8 @@ enum HandleKind
     Menu,
     SubText,
     ExtendRow,
+    MoveRowPoint,
+    MoveRow,
 }
 
 
@@ -74,11 +76,39 @@ class ChainHandle
 
     public string Label =>
         Kind == HandleKind.SubText ? (HasText ? "T" : "+")
+        : Kind == HandleKind.MoveRowPoint ? "\u2022" : Kind == HandleKind.MoveRow ? "\u2195"
         : Kind == HandleKind.MovePoint ? "<>" : Kind == HandleKind.RemovePoint ? "x" : Kind == HandleKind.DeleteRow ? "-"
         : Kind == HandleKind.Menu ? "..." : "+";
 
+    // Shown next to the button while the mouse is over it.
+    public string Hint
+    {
+        get
+        {
+            switch (Kind)
+            {
+                case HandleKind.MovePoint: return "Drag: move this point in all rows";
+                case HandleKind.MoveRowPoint: return "Drag: move this point in this row only";
+                case HandleKind.MoveRow: return "Drag: move this dimension line";
+                case HandleKind.RemovePoint: return "Click: remove this point (merge the two dimensions)";
+                case HandleKind.DeleteRow: return "Click: delete this row";
+                case HandleKind.AddRow: return "Click: add a row with all points";
+                case HandleKind.ExtendRow: return "Click: add points beyond this end";
+                case HandleKind.SubText: return HasText ? "Click: edit the text below" : "Click: add a text below (e.g. RPH 2.10)";
+                case HandleKind.Menu: return "Click: row spacing and texts";
+                default: return "";
+            }
+        }
+    }
+
+    public bool SameAs(ChainHandle other) =>
+        other != null && other.Kind == Kind && other.Group == Group && other.Tag == Tag && other.Row == Row
+        && Math.Abs(other.Along - Along) < 1e-9 && other.DimId == DimId;
+
     public System.Drawing.Color Color =>
         Kind == HandleKind.SubText ? System.Drawing.Color.FromArgb(230, 140, 30)
+        : Kind == HandleKind.MoveRowPoint ? System.Drawing.Color.FromArgb(0, 140, 160)
+        : Kind == HandleKind.MoveRow ? System.Drawing.Color.FromArgb(120, 80, 200)
         : Kind == HandleKind.ExtendRow ? System.Drawing.Color.FromArgb(40, 150, 80)
         : Kind == HandleKind.Menu ? System.Drawing.Color.FromArgb(40, 40, 40)
         : Kind == HandleKind.MovePoint ? System.Drawing.Color.FromArgb(40, 150, 80)
@@ -103,7 +133,7 @@ class DimChain
     public Plane Frame;
     public string Tag;
     public Guid StyleId;
-    public double Spacing;   // distance between rows in model units, 0 = from the style
+    public double Spacing;   // distance between rows in model units at 1:100 (scaled with the style), 0 = from the style
     public List<ChainRow> Rows = new List<ChainRow>();
 
     public double Along(Point3d p) => (p - Frame.Origin) * Frame.XAxis;
@@ -120,10 +150,10 @@ class ChainMember
 }
 
 
-static class AATDim
+static class DimensionTool
 {
     const string PluginName = "ArchitecturalAtelierTools";
-    const string ConfigFilename = "AATDim.json";
+    const string ConfigFilename = "Dimension.json";
 
     // Stored on every dimension of a chain. Chain = same tag + same group.
     public const string KeyChain = "AAT.Dim.Chain";
@@ -134,26 +164,27 @@ static class AATDim
     public const string KeySubFor = "AAT.Dim.SubFor";
 
     static string LayerName = "A_Bemassung_01";
-    static string StyleName = "AAT_Bemassung";
-    static string FontName = "Arial";
-    static double TextHeightMm = 2.0;
+    static string StyleName = "Dimension";
+    static string FontName = "Arial Narrow";
     static double ModelSpaceScale = 50.0;
     static double MeterThreshold = 1.0;
     static int CmDecimals = 0;
     static int MDecimals = 2;
     static string DecimalSeparator = ".";
-    static double RowSpacingMm = 7.0;
-    static double TickSizeMm = 2.0;
-    static double TextGapMm = 1.0;
-    static double ExtensionOffsetMm = 1.0;
-    static double ExtensionOvershootMm = 1.5;
-    static double DimLineOvershootMm = 1.5;
+    // Sizes in metres at 1:100. Each scale style gets them times scale / 100 (1:50 = half, 1:25 = quarter), DimensionScale 1.
+    static double TextHeightM = 0.2;
+    static double RowSpacingM = 0.7;
+    static double TickSizeM = 0.2;
+    static double TextGapM = 0.1;
+    static double ExtensionOffsetM = 0.1;
+    static double ExtensionOvershootM = 0.15;
+    static double DimLineOvershootM = 0.15;
     static int DefaultRows = 2;
     static bool LastRowOverall = true;
 
     static readonly string[] DirectionNames = { "Auto", "Horizontal", "Vertical", "Aligned" };
 
-    // One style per drawing scale, e.g. "AAT_Bemassung_1-50". Same paper sizes, only DimensionScale differs.
+    // One style per drawing scale, e.g. "Dimension_1_50": text 0.2 m at 1:100, 0.1 m at 1:50, 0.05 m at 1:25.
     static readonly int[] Scales = { 100, 50, 25 };
     static readonly string[] ScaleNames = { "1_100", "1_50", "1_25" };
     static int ScaleIndex = -1;   // last chosen scale in this session, -1 = from model_space_scale
@@ -171,7 +202,7 @@ static class AATDim
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), PluginName, ConfigFilename);
 
         string assemblyDir = null;
-        try { assemblyDir = Path.GetDirectoryName(typeof(AATDim).Assembly.Location); } catch (Exception) { }
+        try { assemblyDir = Path.GetDirectoryName(typeof(DimensionTool).Assembly.Location); } catch (Exception) { }
         if (!string.IsNullOrEmpty(assemblyDir))
             yield return Path.Combine(assemblyDir, ConfigFilename);
 
@@ -194,18 +225,18 @@ static class AATDim
             LayerName = ReadString(json, "layer_name", LayerName);
             StyleName = ReadString(json, "style_name", StyleName);
             FontName = ReadString(json, "font", FontName);
-            TextHeightMm = ReadNumber(json, "text_height_mm", TextHeightMm);
+            TextHeightM = ReadNumber(json, "text_height", TextHeightM);
             ModelSpaceScale = ReadNumber(json, "model_space_scale", ModelSpaceScale);
             MeterThreshold = ReadNumber(json, "meter_threshold", MeterThreshold);
             CmDecimals = (int)ReadNumber(json, "cm_decimals", CmDecimals);
             MDecimals = (int)ReadNumber(json, "m_decimals", MDecimals);
             DecimalSeparator = ReadString(json, "decimal_separator", DecimalSeparator);
-            RowSpacingMm = ReadNumber(json, "row_spacing_mm", RowSpacingMm);
-            TickSizeMm = ReadNumber(json, "tick_size_mm", TickSizeMm);
-            TextGapMm = ReadNumber(json, "text_gap_mm", TextGapMm);
-            ExtensionOffsetMm = ReadNumber(json, "extension_offset_mm", ExtensionOffsetMm);
-            ExtensionOvershootMm = ReadNumber(json, "extension_overshoot_mm", ExtensionOvershootMm);
-            DimLineOvershootMm = ReadNumber(json, "dimline_overshoot_mm", DimLineOvershootMm);
+            RowSpacingM = ReadNumber(json, "row_spacing", RowSpacingM);
+            TickSizeM = ReadNumber(json, "tick_size", TickSizeM);
+            TextGapM = ReadNumber(json, "text_gap", TextGapM);
+            ExtensionOffsetM = ReadNumber(json, "extension_offset", ExtensionOffsetM);
+            ExtensionOvershootM = ReadNumber(json, "extension_overshoot", ExtensionOvershootM);
+            DimLineOvershootM = ReadNumber(json, "dimline_overshoot", DimLineOvershootM);
             DefaultRows = Math.Max(1, (int)ReadNumber(json, "default_rows", DefaultRows));
             LastRowOverall = ReadBool(json, "last_row_overall", LastRowOverall);
         }
@@ -256,7 +287,11 @@ static class AATDim
     }
 
 
-    static string StyleNameFor(int scale) => StyleName + "_1-" + scale.ToString(CultureInfo.InvariantCulture);
+    static string StyleNameFor(int scale) => StyleName + "_1_" + scale.ToString(CultureInfo.InvariantCulture);
+
+    // Style names of earlier versions, renamed to the new names when found.
+    static readonly string LegacyStyleName = "AAT_Bemassung";
+    static string LegacyStyleNameFor(int scale) => LegacyStyleName + "_1-" + scale.ToString(CultureInfo.InvariantCulture);
 
 
     static DimensionStyle FindStyleByName(RhinoDoc doc, string name)
@@ -275,50 +310,99 @@ static class AATDim
     }
 
 
-    // All AATDim styles in the document: one per scale, plus the old single style of earlier versions.
+    // All Dimension styles in the document: one per scale, plus the styles of earlier versions.
     static List<DimensionStyle> AatStyles(RhinoDoc doc) =>
         Scales.Select(s => FindStyleByName(doc, StyleNameFor(s)))
-            .Concat(new[] { FindStyleByName(doc, StyleName) })
+            .Concat(Scales.Select(s => FindStyleByName(doc, LegacyStyleNameFor(s))))
+            .Concat(new[] { FindStyleByName(doc, StyleName), FindStyleByName(doc, LegacyStyleName) })
             .Where(s => s != null)
+            .GroupBy(s => s.Id)
+            .Select(g => g.First())
             .ToList();
 
 
-    // The style of the current scale if it exists, else any AATDim style.
+    // "AAT_Bemassung_1-50" becomes "Dimension_1_50"; its dimensions keep using it.
+    static DimensionStyle RenameLegacyStyle(RhinoDoc doc, int scale)
+    {
+        DimensionStyle legacy = FindStyleByName(doc, LegacyStyleNameFor(scale));
+        if (legacy == null || FindStyleByName(doc, StyleNameFor(scale)) != null)
+            return null;
+        var renamed = new DimensionStyle();
+        renamed.CopyFrom(legacy);
+        renamed.Name = StyleNameFor(scale);
+        doc.DimStyles.Modify(renamed, legacy.Index, true);
+        return doc.DimStyles[legacy.Index];
+    }
+
+
+    // The style of the current scale if it exists, else any Dimension style.
     public static DimensionStyle FindStyle(RhinoDoc doc) =>
         FindStyleByName(doc, StyleNameFor(Scales[DefaultScaleIndex()])) ?? AatStyles(doc).FirstOrDefault();
 
 
-    static double MmToModel(RhinoDoc doc) => RhinoMath.UnitScale(UnitSystem.Millimeters, doc.ModelUnitSystem);
+    // 1.0 when the model is in metres.
+    static double MToModel(RhinoDoc doc) => RhinoMath.UnitScale(UnitSystem.Meters, doc.ModelUnitSystem);
+
+
+    static Font ConfigFont()
+    {
+        try
+        {
+            Font font = Font.FromQuartetProperties(FontName, false, false);
+            if (font == null)
+                RhinoApp.WriteLine("Dimension: font '{0}' not found, the style keeps its font.", FontName);
+            return font;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
 
     // Creates the style of one scale from the config, or resets it when reset is true.
     static DimensionStyle EnsureStyle(RhinoDoc doc, int scale, bool reset, bool makeCurrent)
     {
         string name = StyleNameFor(scale);
-        DimensionStyle existing = FindStyleByName(doc, name);
+        DimensionStyle existing = FindStyleByName(doc, name) ?? RenameLegacyStyle(doc, scale);
+        Font font = ConfigFont();
+        double m = MToModel(doc) * scale / 100.0;
+        // Rebuild styles of earlier versions once: paper mm with DimensionScale = scale,
+        // or the same 1:100 sizes in every scale.
+        if (existing != null && (Math.Abs(existing.DimensionScale - 1.0) > 1e-9
+            || (scale != 100 && Math.Abs(existing.TextHeight - TextHeightM * MToModel(doc)) < 1e-9)))
+            reset = true;
         if (existing != null && !reset)
         {
+            // Keep the style, only bring its font in line with the config.
+            if (font != null && !string.Equals(existing.Font?.QuartetName, font.QuartetName, StringComparison.OrdinalIgnoreCase))
+            {
+                var withFont = new DimensionStyle();
+                withFont.CopyFrom(existing);
+                withFont.Font = font;
+                doc.DimStyles.Modify(withFont, existing.Index, true);
+                existing = doc.DimStyles[existing.Index];
+            }
             if (makeCurrent)
                 doc.DimStyles.SetCurrent(existing.Index, false);
             return existing;
         }
 
-        double mm = MmToModel(doc);
         var st = new DimensionStyle();
         st.CopyFrom(existing ?? doc.DimStyles.Current);
         st.Name = name;
 
-        // Sizes are paper sizes in model units; DimensionScale enlarges them in model space.
-        st.TextHeight = TextHeightMm * mm;
-        st.DimensionScale = scale;
-        st.TextGap = TextGapMm * mm;
+        // Sizes for this scale in model units, independent of model space annotation scaling.
+        st.TextHeight = TextHeightM * m;
+        st.DimensionScale = 1.0;
+        st.TextGap = TextGapM * m;
         st.ArrowType1 = DimensionStyle.ArrowType.Tick;
         st.ArrowType2 = DimensionStyle.ArrowType.Tick;
-        st.ArrowLength = TickSizeMm * mm;
-        st.ExtensionLineOffset = ExtensionOffsetMm * mm;
-        st.ExtensionLineExtension = ExtensionOvershootMm * mm;
-        st.DimensionLineExtension = DimLineOvershootMm * mm;
-        st.BaselineSpacing = RowSpacingMm * mm;
+        st.ArrowLength = TickSizeM * m;
+        st.ExtensionLineOffset = ExtensionOffsetM * m;
+        st.ExtensionLineExtension = ExtensionOvershootM * m;
+        st.DimensionLineExtension = DimLineOvershootM * m;
+        st.BaselineSpacing = RowSpacingM * m;
         st.DimTextLocation = DimensionStyle.TextLocation.AboveDimLine;
         st.DimTextAngleType = DimensionStyle.LeaderContentAngleStyle.Aligned;
 
@@ -334,15 +418,8 @@ static class AATDim
         if (!string.IsNullOrEmpty(DecimalSeparator))
             st.DecimalSeparator = DecimalSeparator[0];
 
-        try
-        {
-            Font font = Font.FromQuartetProperties(FontName, false, false);
-            if (font != null)
-                st.Font = font;
-        }
-        catch (Exception)
-        {
-        }
+        if (font != null)
+            st.Font = font;
 
         int index;
         if (existing != null)
@@ -359,8 +436,6 @@ static class AATDim
 
         if (makeCurrent)
             doc.DimStyles.SetCurrent(index, false);
-        if (!doc.ModelSpaceAnnotationScalingEnabled)
-            RhinoApp.WriteLine("AATDim: model space annotation scaling is off - the style scale 1:{0} only applies when it is on.", scale);
         return doc.DimStyles[index];
     }
 
@@ -431,7 +506,7 @@ static class AATDim
     static void TouchUndo(RhinoDoc doc)
     {
         if (UndoDoc == doc && UndoSerial == 0)
-            UndoSerial = doc.BeginUndoRecord("AATDim update");
+            UndoSerial = doc.BeginUndoRecord("Dimension update");
     }
 
     static void ReplaceDim(RhinoDoc doc, Guid id, LinearDimension dim)
@@ -567,7 +642,7 @@ static class AATDim
             return false;
         ReadPoints(dim, out Point3d p1, out Point3d p2, out Point3d dl);
         bool same = (p1.DistanceTo(a) < tol && p2.DistanceTo(b) < tol) || (p1.DistanceTo(b) < tol && p2.DistanceTo(a) < tol);
-        return same && Math.Abs(chain.Across(dl) - offset) < tol;
+        return same && Math.Abs(chain.Across(dl) - offset) < tol && dim.DimensionStyleId == chain.StyleId;
     }
 
 
@@ -689,7 +764,7 @@ static class AATDim
         var probe = new DimChain { Frame = new Plane(p1, dim.Plane.XAxis, dim.Plane.YAxis) };
         double mid = 0.5 * (probe.Along(p1) + probe.Along(p2));
         Point3d onLine = probe.Frame.PointAt(mid, probe.Across(dl));
-        double gap = TextGapMm * PaperMm(doc, style);
+        double gap = style.TextGap > 0.0 ? style.TextGap : TextGapM * MToModel(doc);
         return new Plane(onLine - y * gap, x, y);
     }
 
@@ -795,6 +870,13 @@ static class AATDim
             return;
 
         var replaced = objs.Where(o => old.ContainsKey(o.Id)).ToList();
+        if (replaced.Count == objs.Count
+            && objs.All(o => old[o.Id].DimensionStyleId != ((LinearDimension)o.Geometry).DimensionStyleId))
+        {
+            // Style of the whole chain changed: rows at the distance of the new scale.
+            RespaceChain(doc, group, tag);
+            return;
+        }
         if (replaced.Count == 0 || replaced.Count == objs.Count)
         {
             // New (copied / pasted) or transformed as a whole: only the format can be off.
@@ -881,19 +963,73 @@ static class AATDim
         double.TryParse(obj.Attributes.GetUserString(KeySpacing), NumberStyles.Float, CultureInfo.InvariantCulture, out double v) && v > 0.0 ? v : 0.0;
 
 
+    // 1:50 style = 0.5, 1:25 = 0.25; from the style name "..._1_50" (or "..._1-50"), 1 for other styles.
+    static double ScaleFactor(DimensionStyle style)
+    {
+        Match m = Regex.Match(style?.Name ?? "", "_1[_-]([0-9]+)$");
+        if (m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int scale) && scale > 0)
+            return scale / 100.0;
+        return 1.0;
+    }
+
+
     static double ChainSpacing(RhinoDoc doc, DimChain chain, DimensionStyle style) =>
-        chain.Spacing > 0.0 ? chain.Spacing : RowSpacing(doc, style);
+        chain.Spacing > 0.0 ? chain.Spacing * ScaleFactor(style) : RowSpacing(doc, style);
 
 
-    // Model-space length of one paper millimetre for this style.
-    static double PaperMm(RhinoDoc doc, DimensionStyle style) =>
-        MmToModel(doc) * (doc.ModelSpaceAnnotationScalingEnabled ? style.DimensionScale : 1.0);
+    // Rows keep their order from the inside out; the first row stays where it is.
+    static void Respace(DimChain chain, double spacing)
+    {
+        int sign = OutwardSign(chain);
+        List<ChainRow> ordered = chain.Rows.OrderBy(r => sign * r.Offset).ToList();
+        for (int k = 1; k < ordered.Count; k++)
+            ordered[k].Offset = ordered[0].Offset + sign * k * spacing;
+    }
+
+
+    // Puts the rows of one chain at the distance of its style. Call inside an undo record.
+    static void RespaceChain(RhinoDoc doc, int group, string tag)
+    {
+        List<RhinoObject> objs = ChainObjects(doc, group, tag);
+        if (objs.Count == 0)
+            return;
+        DimChain chain = ChainFromDoc(doc, objs, tag);
+        DimensionStyle style = doc.DimStyles.FindId(chain.StyleId) ?? doc.DimStyles.Current;
+        Respace(chain, ChainSpacing(doc, chain, style));
+        Regenerate(doc, chain, objs, objs[0].Attributes);
+    }
+
+
+    // Every chain that uses an Dimension style gets the row distance of its scale.
+    static int RespaceAll(RhinoDoc doc)
+    {
+        var aat = new HashSet<Guid>(AatStyles(doc).Select(st => st.Id));
+        var keys = new HashSet<Tuple<int, string>>();
+        foreach (RhinoObject obj in doc.Objects.GetObjectList(ObjectType.Annotation))
+            if (obj.Geometry is LinearDimension dim && aat.Contains(dim.DimensionStyleId) && ChainKey(obj, out int group, out string tag))
+                keys.Add(Tuple.Create(group, tag));
+        if (keys.Count == 0)
+            return 0;
+
+        DimWatcher.Busy = true;
+        uint undo = doc.BeginUndoRecord("Dimension row spacing");
+        try
+        {
+            foreach (var key in keys)
+                RespaceChain(doc, key.Item1, key.Item2);
+        }
+        finally
+        {
+            doc.EndUndoRecord(undo);
+            DimWatcher.Busy = false;
+        }
+        return keys.Count;
+    }
 
 
     static double RowSpacing(RhinoDoc doc, DimensionStyle style)
     {
-        double spacing = style.BaselineSpacing > 0.0 ? style.BaselineSpacing : RowSpacingMm * MmToModel(doc);
-        return spacing * (doc.ModelSpaceAnnotationScalingEnabled ? style.DimensionScale : 1.0);
+        return style.BaselineSpacing > 0.0 ? style.BaselineSpacing : RowSpacingM * MToModel(doc) * ScaleFactor(style);
     }
 
 
@@ -1027,8 +1163,9 @@ static class AATDim
 
     // ------------------------------------------------------------------ on-screen buttons
 
-    // Buttons of every selected chain: "x" on each inner point (merge the two segments),
-    // "-" at the start of each row (delete row), "+" beyond the outermost row (add row).
+    // Buttons of every selected chain: a mark on every point of every dimension line (drag = move in this row),
+    // "<>" on the measure points (drag = move in all rows), "x" next to inner points (merge the two segments),
+    // a move button after each row, "-" at the start of each row (delete row), "+" beyond the outermost row (add row).
     public static List<ChainHandle> Handles(RhinoDoc doc, RhinoViewport viewport)
     {
         var handles = new List<ChainHandle>();
@@ -1066,31 +1203,7 @@ static class AATDim
                 handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.MovePoint, -1, along, p));
             }
 
-            foreach (ChainRow row in chain.Rows)
-            {
-                for (int i = 1; i + 1 < row.Points.Count; i++)
-                {
-                    double along = chain.Along(row.Points[i]);
-                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.RemovePoint, row.Index, along,
-                        chain.Frame.PointAt(along, row.Offset)));
-                }
-                if (chain.Rows.Count > 1)
-                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.DeleteRow, row.Index, side,
-                        chain.Frame.PointAt(side, row.Offset)));
-
-                // "+" just beyond both ends of the row: add one more point there.
-                if (row.Points.Count > 0)
-                {
-                    double startAlong = chain.Along(row.Points[0]);
-                    double endAlong = chain.Along(row.Points[row.Points.Count - 1]);
-                    double gap = 16.0 / pixelsPerUnit;
-                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, startAlong,
-                        chain.Frame.PointAt(startAlong - gap, row.Offset)));
-                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, endAlong,
-                        chain.Frame.PointAt(endAlong + gap, row.Offset)));
-                }
-            }
-
+            var textSide = new Dictionary<int, int>();
             // "+" right next to each dimension text: add / edit the text below that dimension.
             foreach (RhinoObject obj in objs)
             {
@@ -1109,10 +1222,46 @@ static class AATDim
                     right = placed.Max(chain.Along);
                     across = placed.Average(chain.Across);
                 }
+                if (!textSide.ContainsKey(RowOf(obj)) && Math.Abs(across - chain.Across(dl)) > 1e-9)
+                    textSide[RowOf(obj)] = across > chain.Across(dl) ? 1 : -1;
                 double along = right + 9.0 / pixelsPerUnit;
                 bool hasText = !string.IsNullOrWhiteSpace(obj.Attributes.GetUserString(KeySub));
                 handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.SubText, RowOf(obj), along,
                     chain.Frame.PointAt(along, across), obj.Id, hasText));
+            }
+
+            double px = 1.0 / pixelsPerUnit;
+            foreach (ChainRow row in chain.Rows)
+            {
+                // The "x" sits on the side of the line away from the dimension texts.
+                int away = textSide.TryGetValue(row.Index, out int ts) ? -ts : -1;
+                for (int i = 0; i < row.Points.Count; i++)
+                {
+                    double along = chain.Along(row.Points[i]);
+                    // A mark on every point of the dimension line: drag it to move the point in this row only.
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.MoveRowPoint, row.Index, along,
+                        chain.Frame.PointAt(along, row.Offset)));
+                    if (i > 0 && i + 1 < row.Points.Count)
+                        handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.RemovePoint, row.Index, along,
+                            chain.Frame.PointAt(along, row.Offset + away * 15.0 * px)));
+                }
+                if (chain.Rows.Count > 1)
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.DeleteRow, row.Index, side,
+                        chain.Frame.PointAt(side, row.Offset)));
+
+                // "+" just beyond both ends of the row: add more points there. Further out: move the whole line.
+                if (row.Points.Count > 0)
+                {
+                    double startAlong = chain.Along(row.Points[0]);
+                    double endAlong = chain.Along(row.Points[row.Points.Count - 1]);
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, startAlong,
+                        chain.Frame.PointAt(startAlong - 20.0 * px, row.Offset)));
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.ExtendRow, row.Index, endAlong,
+                        chain.Frame.PointAt(endAlong + 20.0 * px, row.Offset)));
+                    double moveAlong = endAlong + 44.0 * px;
+                    handles.Add(new ChainHandle(key.Item1, key.Item2, HandleKind.MoveRow, row.Index, moveAlong,
+                        chain.Frame.PointAt(moveAlong, row.Offset)));
+                }
             }
 
             int sign = OutwardSign(chain);
@@ -1172,30 +1321,104 @@ static class AATDim
     };
 
 
-    // Asks for the new location (with osnaps and a live preview). Changes chain; false on cancel.
-    static bool PickMovedPoint(RhinoDoc doc, DimChain chain, DimensionStyle style, ChainHandle h)
+    // Moves the point at "along" in one row only. Points that land on a neighbour merge with it.
+    static void MovePointInRow(RhinoDoc doc, DimChain chain, int rowIndex, double along, Point3d to)
+    {
+        ChainRow row = chain.Rows.FirstOrDefault(r => r.Index == rowIndex);
+        if (row == null)
+            return;
+        double tol = Tol(doc);
+        for (int i = 0; i < row.Points.Count; i++)
+            if (Math.Abs(chain.Along(row.Points[i]) - along) < tol)
+                row.Points[i] = to;
+        NormalizeRow(chain, row, tol);
+        if (row.Points.Count < 2)
+            chain.Rows.Remove(row);
+    }
+
+
+    static GetResult GetTarget(DimChain chain, DimensionStyle style, Point3d from, string prompt,
+                               Action<DimChain, Point3d> apply, bool onMouseUp, out Point3d picked)
     {
         var gp = new GetPoint();
-        gp.SetCommandPrompt("New location of the dimension point");
-        gp.SetBasePoint(h.Point, true);
-        gp.DrawLineFromPoint(h.Point, true);
+        gp.SetCommandPrompt(prompt);
+        gp.SetBasePoint(from, true);
+        gp.DrawLineFromPoint(from, true);
         gp.DynamicDraw += (sender, e) =>
         {
             DimChain preview = CloneChain(chain);
-            MovePointInChain(doc, preview, h, e.CurrentPoint);
+            apply(preview, e.CurrentPoint);
             DrawPreview(e, PreviewDims(preview, style));
         };
+        GetResult res = gp.Get(onMouseUp);
+        picked = res == GetResult.Point ? gp.Point() : Point3d.Unset;
+        return res;
+    }
 
+
+    // Drag-and-release (the button is still held when this starts) or click-and-click, with osnaps
+    // and a live preview. Changes chain; false on cancel.
+    static bool PickTarget(RhinoDoc doc, DimChain chain, DimensionStyle style, Point3d from, string prompt,
+                           Action<DimChain, Point3d> apply)
+    {
         bool wasBusy = DimWatcher.Busy;
         DimWatcher.Busy = true;
-        GetResult res;
-        try { res = gp.Get(); }
-        finally { DimWatcher.Busy = wasBusy; }
+        try
+        {
+            GetResult res = GetTarget(chain, style, from, prompt + " (release to place)", apply, true, out Point3d p);
+            if (res != GetResult.Point)
+                return false;
 
-        if (res != GetResult.Point)
-            return false;
-        MovePointInChain(doc, chain, h, gp.Point());
+            // Released without moving: it was a click, so ask for the location with a second click.
+            RhinoViewport vp = doc.Views.ActiveView?.ActiveViewport;
+            if (vp != null && vp.WorldToClient(p).DistanceTo(vp.WorldToClient(from)) < 4.0)
+            {
+                res = GetTarget(chain, style, from, prompt, apply, false, out p);
+                if (res != GetResult.Point)
+                    return false;
+            }
+            apply(chain, p);
+        }
+        finally { DimWatcher.Busy = wasBusy; }
         return chain.Rows.Count > 0;
+    }
+
+
+    // What a click on h would change, drawn while the mouse is over the button.
+    public static void DrawHoverPreview(DrawEventArgs e, RhinoDoc doc, ChainHandle h)
+    {
+        if (h.Kind != HandleKind.RemovePoint && h.Kind != HandleKind.AddRow && h.Kind != HandleKind.DeleteRow)
+            return;
+        List<RhinoObject> objs = ChainObjects(doc, h.Group, h.Tag);
+        if (objs.Count == 0)
+            return;
+        DimChain chain = ChainFromDoc(doc, objs, h.Tag);
+        DimensionStyle style = doc.DimStyles.FindId(chain.StyleId) ?? doc.DimStyles.Current;
+        ChainRow row = chain.Rows.FirstOrDefault(r => r.Index == h.Row);
+        var shown = new DimChain { Frame = chain.Frame };
+        System.Drawing.Color color = Rhino.ApplicationSettings.AppearanceSettings.FeedbackColor;
+
+        switch (h.Kind)
+        {
+            case HandleKind.RemovePoint:
+                if (row == null || row.Points.Count < 3)
+                    return;
+                var merged = new ChainRow { Index = row.Index, Offset = row.Offset, Points = new List<Point3d>(row.Points) };
+                merged.Points.Remove(merged.Points.OrderBy(p => Math.Abs(chain.Along(p) - h.Along)).First());
+                shown.Rows.Add(merged);
+                break;
+            case HandleKind.AddRow:
+                shown.Rows.Add(NewOuterRow(doc, chain, style, chain.Rows.SelectMany(r => r.Points)));
+                break;
+            case HandleKind.DeleteRow:
+                if (row == null)
+                    return;
+                shown.Rows.Add(row);
+                color = System.Drawing.Color.FromArgb(200, 60, 50);
+                break;
+        }
+        foreach (LinearDimension dim in PreviewDims(shown, style))
+            e.Display.DrawAnnotation(dim, color);
     }
 
 
@@ -1251,7 +1474,7 @@ static class AATDim
     // Chain menu: distance between the dimension lines and a text below each dimension.
     static void ShowMenu(RhinoDoc doc, List<RhinoObject> objs, DimChain chain, DimensionStyle style, ChainHandle h)
     {
-        double paperMm = PaperMm(doc, style);
+        double meter = MToModel(doc);
         List<ChainRow> rows = chain.Rows.OrderBy(r => r.Index).ToList();
         double current = chain.Spacing > 0.0 || rows.Count < 2
             ? ChainSpacing(doc, chain, style)
@@ -1259,12 +1482,31 @@ static class AATDim
 
         var spacingBox = new Eto.Forms.NumericStepper
         {
-            Value = Math.Round(current / paperMm, 1),
-            MinValue = 1.0,
-            MaxValue = 1000.0,
-            DecimalPlaces = 1,
-            Increment = 0.5,
+            Value = Math.Round(current / meter, 3),
+            MinValue = 0.01,
+            MaxValue = 100.0,
+            DecimalPlaces = 3,
+            Increment = 0.05,
             Width = 90,
+        };
+
+        // Changing the scale also puts the rows at the distance of the new scale.
+        int scaleNow = Array.FindIndex(Scales, sc => FindStyleByName(doc, StyleNameFor(sc))?.Id == style.Id);
+        var scaleBox = new Eto.Forms.DropDown { Width = 90 };
+        foreach (int sc in Scales)
+            scaleBox.Items.Add("1:" + sc.ToString(CultureInfo.InvariantCulture));
+        scaleBox.SelectedIndex = scaleNow;
+        double factorNow = ScaleFactor(style);
+        bool settingSpacing = false;
+        bool spacingTouched = false;
+        spacingBox.ValueChanged += (sender, e) => { if (!settingSpacing) spacingTouched = true; };
+        scaleBox.SelectedIndexChanged += (sender, e) =>
+        {
+            if (spacingTouched || scaleBox.SelectedIndex < 0)
+                return;
+            settingSpacing = true;
+            spacingBox.Value = Math.Round(current / meter * Scales[scaleBox.SelectedIndex] / 100.0 / factorNow, 3);
+            settingSpacing = false;
         };
 
         var segments = objs
@@ -1300,9 +1542,13 @@ static class AATDim
             HorizontalContentAlignment = Eto.Forms.HorizontalAlignment.Stretch,
             Items =
             {
-                new Eto.Forms.TableLayout(new Eto.Forms.TableRow(
-                    new Eto.Forms.Label { Text = "Distance between dimension lines (mm on paper)", VerticalAlignment = Eto.Forms.VerticalAlignment.Center },
-                    spacingBox)) { Spacing = new Eto.Drawing.Size(10, 0) },
+                new Eto.Forms.TableLayout(
+                    new Eto.Forms.TableRow(
+                        new Eto.Forms.Label { Text = "Scale", VerticalAlignment = Eto.Forms.VerticalAlignment.Center },
+                        scaleBox),
+                    new Eto.Forms.TableRow(
+                        new Eto.Forms.Label { Text = "Distance between dimension lines (m)", VerticalAlignment = Eto.Forms.VerticalAlignment.Center },
+                        spacingBox)) { Spacing = new Eto.Drawing.Size(10, 4) },
                 new Eto.Forms.Label { Text = "Text below the dimension line (e.g. door height):" },
                 new Eto.Forms.Scrollable { Content = table, Height = Math.Min(360, 30 * segments.Count + 10), Border = Eto.Forms.BorderType.None },
                 new Eto.Forms.TableLayout(new Eto.Forms.TableRow(new Eto.Forms.TableCell(null, true), ok, cancel)) { Spacing = new Eto.Drawing.Size(6, 0) },
@@ -1317,15 +1563,21 @@ static class AATDim
         if (!accepted)
             return;
 
-        double spacing = spacingBox.Value * paperMm;
+        double spacing = spacingBox.Value * meter;
         DimWatcher.Busy = true;
-        uint undo = doc.BeginUndoRecord("AATDim chain settings");
+        uint undo = doc.BeginUndoRecord("Dimension chain settings");
         try
         {
+            DimensionStyle newStyle = style;
+            if (scaleBox.SelectedIndex >= 0 && scaleBox.SelectedIndex != scaleNow)
+                newStyle = EnsureStyle(doc, Scales[scaleBox.SelectedIndex], false, false) ?? style;
+            // Stored at 1:100, so the distance follows when the scale changes later.
+            double stored = spacing / ScaleFactor(newStyle);
+
             for (int i = 0; i < segments.Count; i++)
             {
                 ObjectAttributes attrs = segments[i].Attributes.Duplicate();
-                attrs.SetUserString(KeySpacing, spacing.ToString("R", CultureInfo.InvariantCulture));
+                attrs.SetUserString(KeySpacing, stored.ToString("R", CultureInfo.InvariantCulture));
                 string sub = (subBoxes[i].Text ?? "").Trim();
                 if (sub.Length > 0)
                     attrs.SetUserString(KeySub, sub);
@@ -1334,13 +1586,10 @@ static class AATDim
                 doc.Objects.ModifyAttributes(segments[i], attrs, true);
             }
 
-            // Rows keep their order from the inside out; the first row stays where it is.
             List<RhinoObject> fresh = ChainObjects(doc, h.Group, h.Tag);
             DimChain updated = ChainFromDoc(doc, fresh, h.Tag);
-            int sign = OutwardSign(updated);
-            List<ChainRow> ordered = updated.Rows.OrderBy(r => sign * r.Offset).ToList();
-            for (int k = 1; k < ordered.Count; k++)
-                ordered[k].Offset = ordered[0].Offset + sign * k * spacing;
+            updated.StyleId = newStyle.Id;
+            Respace(updated, spacing);
 
             Regenerate(doc, updated, fresh, fresh[0].Attributes);
         }
@@ -1377,7 +1626,7 @@ static class AATDim
             return;
 
         DimWatcher.Busy = true;
-        uint undo = doc.BeginUndoRecord("AATDim text below");
+        uint undo = doc.BeginUndoRecord("Dimension text below");
         try
         {
             ObjectAttributes attrs = obj.Attributes.Duplicate();
@@ -1402,6 +1651,7 @@ static class AATDim
 
     public static void ApplyHandle(RhinoDoc doc, ChainHandle h)
     {
+        DimWatcher.Hover = null;
         List<RhinoObject> objs = ChainObjects(doc, h.Group, h.Tag);
         if (objs.Count == 0)
             return;
@@ -1418,7 +1668,18 @@ static class AATDim
                 EditSubText(doc, h);
                 return;
             case HandleKind.MovePoint:
-                if (!PickMovedPoint(doc, chain, style, h))
+                if (!PickTarget(doc, chain, style, h.Point, "New location of the point (all rows)",
+                        (c, p) => MovePointInChain(doc, c, h, p)))
+                    return;
+                break;
+            case HandleKind.MoveRowPoint:
+                if (!PickTarget(doc, chain, style, h.Point, "New location of the point (this row)",
+                        (c, p) => MovePointInRow(doc, c, h.Row, h.Along, p)))
+                    return;
+                break;
+            case HandleKind.MoveRow:
+                if (row == null || !PickTarget(doc, chain, style, h.Point, "New location of the dimension line",
+                        (c, p) => { ChainRow moved = c.Rows.FirstOrDefault(x => x.Index == h.Row); if (moved != null) moved.Offset = c.Across(p); }))
                     return;
                 break;
             case HandleKind.ExtendRow:
@@ -1441,7 +1702,7 @@ static class AATDim
         }
 
         DimWatcher.Busy = true;
-        uint undo = doc.BeginUndoRecord("AATDim edit");
+        uint undo = doc.BeginUndoRecord("Dimension edit");
         try
         {
             Regenerate(doc, chain, objs, objs[0].Attributes);
@@ -1515,8 +1776,11 @@ static class AATDim
                             EnsureStyle(doc, Scales[i], true, i == scaleIndex);
                     }
                     finally { DimWatcher.Busy = false; }
-                    RhinoApp.WriteLine("AATDim: styles {0} reset from {1}, '{2}' set current.",
+                    RhinoApp.WriteLine("Dimension: styles {0} reset from {1}, '{2}' set current.",
                         string.Join(", ", Scales.Select(s => "'" + StyleNameFor(s) + "'")), ConfigFilename, StyleNameFor(Scales[scaleIndex]));
+                    int respaced = RespaceAll(doc);
+                    if (respaced > 0)
+                        RhinoApp.WriteLine("Dimension: rows of {0} chain(s) set to the distance of their scale.", respaced);
                     UpdateAll(doc);
                     continue;
                 }
@@ -1544,7 +1808,7 @@ static class AATDim
         finally { DimWatcher.Busy = false; }
         if (style == null)
         {
-            RhinoApp.WriteLine("AATDim: could not create dimension style '{0}'.", StyleNameFor(Scales[scaleIndex]));
+            RhinoApp.WriteLine("Dimension: could not create dimension style '{0}'.", StyleNameFor(Scales[scaleIndex]));
             return;
         }
 
@@ -1574,7 +1838,7 @@ static class AATDim
             return;
         if (points.Count < 2)
         {
-            RhinoApp.WriteLine("AATDim: a row needs at least two points.");
+            RhinoApp.WriteLine("Dimension: a row needs at least two points.");
             return;
         }
 
@@ -1586,7 +1850,7 @@ static class AATDim
         NormalizeRow(chain, row0, Tol(doc));
         if (row0.Points.Count < 2)
         {
-            RhinoApp.WriteLine("AATDim: all points lie on one line across the measuring direction.");
+            RhinoApp.WriteLine("Dimension: all points lie on one line across the measuring direction.");
             return;
         }
 
@@ -1605,7 +1869,7 @@ static class AATDim
         AddGeneratedRows(doc, chain, style, rowCount);
 
         DimWatcher.Busy = true;
-        uint undo = doc.BeginUndoRecord("AATDim");
+        uint undo = doc.BeginUndoRecord("Dimension");
         try
         {
             var attrs = doc.CreateDefaultAttributes();
@@ -1613,7 +1877,7 @@ static class AATDim
             attrs.AddToGroup(doc.Groups.Add());
             Regenerate(doc, chain, new List<RhinoObject>(), attrs);
             int count = chain.Rows.Sum(r => Math.Max(0, r.Points.Count - 1));
-            RhinoApp.WriteLine("AATDim: {0} row(s), {1} dimension(s) on layer '{2}'.", chain.Rows.Count, count, LayerName);
+            RhinoApp.WriteLine("Dimension: {0} row(s), {1} dimension(s) on layer '{2}'.", chain.Rows.Count, count, LayerName);
         }
         finally
         {
@@ -1627,7 +1891,7 @@ static class AATDim
     static void EditChain(RhinoDoc doc)
     {
         var go = new GetObject();
-        go.SetCommandPrompt("Select a dimension of an AATDim chain");
+        go.SetCommandPrompt("Select a dimension of a Dimension chain");
         go.GeometryFilter = ObjectType.Annotation;
         go.SetCustomGeometryFilter((obj, geometry, componentIndex) => ChainKey(obj, out int _, out string _));
         go.EnablePreSelect(true, true);
@@ -1723,7 +1987,7 @@ static class AATDim
             }
 
             DimWatcher.Busy = true;
-            uint undo = doc.BeginUndoRecord("AATDim edit");
+            uint undo = doc.BeginUndoRecord("Dimension edit");
             try
             {
                 Regenerate(doc, chain, objs, objs[0].Attributes);
@@ -1738,7 +2002,7 @@ static class AATDim
     }
 
 
-    // Re-applies the cm / m format to every dimension that uses one of the AATDim styles.
+    // Re-applies the cm / m format to every dimension that uses one of the Dimension styles.
     static void UpdateAll(RhinoDoc doc)
     {
         Dictionary<Guid, DimensionStyle> styles = AatStyles(doc).ToDictionary(s => s.Id);
@@ -1750,7 +2014,7 @@ static class AATDim
             .ToList();
 
         DimWatcher.Busy = true;
-        uint undo = doc.BeginUndoRecord("AATDim update");
+        uint undo = doc.BeginUndoRecord("Dimension update");
         try
         {
             foreach (var d in dims)
@@ -1762,7 +2026,7 @@ static class AATDim
             DimWatcher.Busy = false;
         }
         doc.Views.Redraw();
-        RhinoApp.WriteLine("AATDim: {0} dimension(s) with AATDim styles checked. Edit watcher is on for this session.", dims.Count);
+        RhinoApp.WriteLine("Dimension: {0} dimension(s) with Dimension styles checked. Edit watcher is on for this session.", dims.Count);
     }
 }
 
@@ -1770,7 +2034,7 @@ static class AATDim
 // Watches dimension edits for the whole Rhino session and fixes format and chains once the command is done.
 static class DimWatcher
 {
-    const string DomainKey = "ArchitecturalAtelierTools.AATDim.Watcher";
+    const string DomainKey = "ArchitecturalAtelierTools.Dimension.Watcher";
 
     class DocState
     {
@@ -1787,6 +2051,10 @@ static class DimWatcher
     // A clicked button, run on the next idle (not inside the mouse event).
     public static uint ClickedDoc;
     public static ChainHandle Clicked;
+
+    // The button under the mouse and the viewport it is in.
+    public static ChainHandle Hover;
+    public static Guid HoverViewport;
 
 
     public static void Install()
@@ -1814,6 +2082,7 @@ static class DimWatcher
         Mouse.Enabled = false;
         States.Clear();
         Clicked = null;
+        Hover = null;
     }
 
 
@@ -1875,8 +2144,8 @@ static class DimWatcher
             RhinoDoc clickedDoc = RhinoDoc.FromRuntimeSerialNumber(ClickedDoc);
             if (clickedDoc != null)
             {
-                try { AATDim.ApplyHandle(clickedDoc, handle); }
-                catch (Exception ex) { RhinoApp.WriteLine("AATDim: button failed - {0}", ex.Message); }
+                try { DimensionTool.ApplyHandle(clickedDoc, handle); }
+                catch (Exception ex) { RhinoApp.WriteLine("Dimension: button failed - {0}", ex.Message); }
             }
         }
 
@@ -1894,11 +2163,11 @@ static class DimWatcher
             Busy = true;
             try
             {
-                AATDim.ProcessEdits(doc, state.Old, state.Added);
+                DimensionTool.ProcessEdits(doc, state.Old, state.Added);
             }
             catch (Exception ex)
             {
-                RhinoApp.WriteLine("AATDim: could not update dimensions - {0}", ex.Message);
+                RhinoApp.WriteLine("Dimension: could not update dimensions - {0}", ex.Message);
             }
             finally
             {
@@ -1918,8 +2187,26 @@ class ChainButtonsConduit : DisplayConduit
         {
             if (DimWatcher.Busy || Command.InCommand())
                 return;
-            foreach (ChainHandle h in AATDim.Handles(e.RhinoDoc, e.Viewport))
+            List<ChainHandle> handles = DimensionTool.Handles(e.RhinoDoc, e.Viewport);
+            ChainHandle hover = DimWatcher.Hover != null && DimWatcher.HoverViewport == e.Viewport.Id
+                ? handles.FirstOrDefault(h => h.SameAs(DimWatcher.Hover)) : null;
+            if (hover != null)
+                DimensionTool.DrawHoverPreview(e, e.RhinoDoc, hover);
+
+            foreach (ChainHandle h in handles)
                 e.Display.DrawDot(h.Point, h.Label, h.Color, System.Drawing.Color.White);
+
+            if (hover != null)
+            {
+                // Highlighted button and a short hint what it does.
+                e.Display.DrawDot(hover.Point, hover.Label, System.Drawing.Color.FromArgb(255, 200, 0), System.Drawing.Color.Black);
+                Point2d s = e.Viewport.WorldToClient(hover.Point);
+                var at = new Point2d(s.X + 16, s.Y - 22);
+                System.Drawing.Rectangle box = e.Display.Measure2dText(hover.Hint, at, false, 0.0, 12, "Arial");
+                box.Inflate(5, 3);
+                e.Display.Draw2dRectangle(box, System.Drawing.Color.FromArgb(120, 120, 120), 1, System.Drawing.Color.FromArgb(250, 250, 245));
+                e.Display.Draw2dText(hover.Hint, System.Drawing.Color.FromArgb(30, 30, 30), at, false, 12, "Arial");
+            }
         }
         catch (Exception)
         {
@@ -1941,7 +2228,7 @@ class ChainButtonsMouse : Rhino.UI.MouseCallback
             if (e.MouseButton != Rhino.UI.MouseButton.Left || DimWatcher.Busy || Command.InCommand() || e.View == null)
                 return;
             RhinoDoc doc = e.View.Document;
-            ChainHandle hit = AATDim.HitHandle(doc, e.View.ActiveViewport, e.ViewportPoint, HitRadiusPixels);
+            ChainHandle hit = DimensionTool.HitHandle(doc, e.View.ActiveViewport, e.ViewportPoint, HitRadiusPixels);
             if (hit == null)
                 return;
             e.Cancel = true;
@@ -1959,7 +2246,30 @@ class ChainButtonsMouse : Rhino.UI.MouseCallback
         if (swallowUp)
         {
             swallowUp = false;
-            e.Cancel = true;
+            // While a drag is running, the release must reach it to place the point.
+            if (!DimWatcher.Busy)
+                e.Cancel = true;
+        }
+    }
+
+    protected override void OnMouseMove(Rhino.UI.MouseCallbackEventArgs e)
+    {
+        try
+        {
+            if (e.View == null)
+                return;
+            ChainHandle hit = null;
+            if (!DimWatcher.Busy && !Command.InCommand())
+                hit = DimensionTool.HitHandle(e.View.Document, e.View.ActiveViewport, e.ViewportPoint, HitRadiusPixels);
+            bool same = hit == null ? DimWatcher.Hover == null : hit.SameAs(DimWatcher.Hover);
+            if (same)
+                return;
+            DimWatcher.Hover = hit;
+            DimWatcher.HoverViewport = e.View.ActiveViewportID;
+            e.View.Redraw();
+        }
+        catch (Exception)
+        {
         }
     }
 }
