@@ -43,7 +43,7 @@ struct CutLine
 
 static class BattInsulationLine
 {
-    const string PluginName = "ArchitecturalAtelierTools";
+    const string PluginName = "ABeeTool";
     const string ConfigFilename = "BattInsulationLine.json";
 
     static string LayerName = "A_Isolation_01";

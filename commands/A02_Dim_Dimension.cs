@@ -152,7 +152,7 @@ class ChainMember
 
 static class DimensionTool
 {
-    const string PluginName = "ArchitecturalAtelierTools";
+    const string PluginName = "ABeeTool";
     const string ConfigFilename = "Dimension.json";
 
     // Stored on every dimension of a chain. Chain = same tag + same group.
@@ -2034,7 +2034,7 @@ static class DimensionTool
 // Watches dimension edits for the whole Rhino session and fixes format and chains once the command is done.
 static class DimWatcher
 {
-    const string DomainKey = "ArchitecturalAtelierTools.Dimension.Watcher";
+    const string DomainKey = "ABeeTool.Dimension.Watcher";
 
     class DocState
     {

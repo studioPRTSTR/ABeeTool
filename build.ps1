@@ -4,7 +4,10 @@ param(
 
     [string]$Feed = "",
 
-    [string]$Project = ""
+    [string]$Project = "",
+
+    # Name of the toolbar in Rhino.
+    [string]$ToolbarName = "=^..^="
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +26,7 @@ if ($Version -notmatch '^\d+\.\d+(\.\d+)?(-[0-9A-Za-z.]+)?$') {
     throw "Version '$Version' must look like 1.0, 1.0.3 or 1.1.0-beta."
 }
 if (-not (Test-Path $Project)) {
-    throw "Project '$Project' not found. Create it once in Rhino's ScriptEditor (File > Create Project) and save it as ArchitecturalAtelierTools.rhproj in this folder."
+    throw "Project '$Project' not found. Create it once in Rhino's ScriptEditor (File > Create Project) and save it in this folder."
 }
 
 $versionPattern = "-" + [regex]::Escape($Version) + "(\+\d+)?-"
@@ -36,7 +39,7 @@ if (Test-Path $buildPath) {
     Remove-Item $buildPath -Recurse -Force
 }
 
-Write-Host "Building ArchitecturalAtelierTools $Version ..."
+Write-Host "Building ABeeTool $Version ..."
 & $rhinoCode project build $Project --buildversion $Version --buildtarget "8.*" --buildpath $buildPath
 if ($LASTEXITCODE -ne 0) {
     throw "rhinocode build failed (exit code $LASTEXITCODE). Is Rhino 8 running?"
@@ -45,6 +48,44 @@ if ($LASTEXITCODE -ne 0) {
 $yak = Get-ChildItem $buildPath -Recurse -Filter *.yak | Select-Object -First 1
 if (-not $yak) {
     throw "Build finished but no .yak package was found in '$buildPath'."
+}
+
+# Fix up what rhinocode generates, inside the .yak (a zip).
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+
+function Edit-ZipEntry($zip, [string]$name, [scriptblock]$change) {
+    $entry = $zip.Entries | Where-Object { $_.FullName -like $name } | Select-Object -First 1
+    if (-not $entry) {
+        throw "No '$name' in '$($yak.FullName)'."
+    }
+    $fullName = $entry.FullName
+    $reader = New-Object System.IO.StreamReader($entry.Open())
+    $text = $reader.ReadToEnd()
+    $reader.Close()
+    $text = & $change $text
+    $entry.Delete()
+    $writer = New-Object System.IO.StreamWriter($zip.CreateEntry($fullName).Open(), (New-Object System.Text.UTF8Encoding($false)))
+    $writer.Write($text)
+    $writer.Close()
+}
+
+$zip = [System.IO.Compression.ZipFile]::Open($yak.FullName, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+    # rhinocode adds a build number ("1.1.1+25311"). Package Manager would show it, so set the plain version.
+    Edit-ZipEntry $zip "manifest.yml" { param($t) [regex]::Replace($t, '(?m)^version:\s*\S+', "version: $Version") }
+
+    # Name of the toolbar (and its group / tab) instead of the plugin name.
+    $toolbarXml = [System.Security.SecurityElement]::Escape($ToolbarName)
+    Edit-ZipEntry $zip "*.rui" { param($t) $t.Replace("<locale_1033>ABeeTool</locale_1033>", "<locale_1033>$toolbarXml</locale_1033>") }
+}
+finally {
+    $zip.Dispose()
+}
+$cleanName = [regex]::Replace($yak.Name, '\+\d+', '')
+if ($cleanName -ne $yak.Name) {
+    $cleanPath = Join-Path $yak.DirectoryName $cleanName
+    Move-Item $yak.FullName $cleanPath -Force
+    $yak = Get-Item $cleanPath
 }
 Write-Host "Package: $($yak.FullName)"
 

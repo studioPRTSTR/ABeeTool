@@ -1,4 +1,6 @@
-<h1><img src="icons/ArchitecturalAtelierTools.svg" height="40" align="top"> ArchitecturalAtelierTools</h1>
+<h1><img src="icons/ABeeTool.svg" height="40" align="top"> A Bee Tool</h1>
+
+**ABeeTool** – read it as *A Bee Tool*, or here: *Architectural Be Tool*.
 
 Rhino 8 tools for architectural drawings.
 
@@ -10,15 +12,15 @@ Rhino 8 tools for architectural drawings.
 
 ## Install
 
-Download the `.yak` from [Releases](../../releases) and drag it into Rhino 8, or install `ArchitecturalAtelierTools` via `_PackageManager`. Restart Rhino.
+Download the `.yak` from [Releases](../../releases) and drag it into Rhino 8, or install `ABeeTool` via `_PackageManager`. Restart Rhino.
 
 ---
 
 ## A01_Pre_Preferences
 
-Run `A01_Pre_Preferences` to set the layer per tool. Further defaults can be set in `Dimension.json` / `BattInsulationLine.json` in `%APPDATA%\ArchitecturalAtelierTools\`.
+Run `A01_Pre_Preferences` to set the layer per tool. Further defaults can be set in `Dimension.json` / `BattInsulationLine.json` in `%APPDATA%\ABeeTool\`.
 
-**Saved configs**: *Save as...* stores the current settings of all tools under a name (e.g. one per office standard or project), *Load* puts one back into the window (click *Save* to use it), *Delete* removes it. They are kept in `%APPDATA%\ArchitecturalAtelierTools\configs\<name>\`.
+**Saved configs**: *Save as...* stores the current settings of all tools under a name (e.g. one per office standard or project), *Load* puts one back into the window (click *Save* to use it), *Delete* removes it. They are kept in `%APPDATA%\ABeeTool\configs\<name>\`.
 
 ---
 

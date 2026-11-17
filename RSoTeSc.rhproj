@@ -7,13 +7,13 @@
   },
   "id": "aafc033b-7fea-4a4a-a7d8-30f6e82e0f3b",
   "identity": {
-    "name": "ArchitecturalAtelierTools",
-    "version": "1.0.1",
+    "name": "ABeeTool",
+    "version": "1.0.0",
     "publisher": {
       "email": "contact@studiogruber.at",
       "name": "Manuel Gruber"
     },
-    "description": "Rhino 8 tools for architectural drawings. Currently includes: preferences, multi-row dimension chains, batt insulation line.",
+    "description": "A Bee Tool - Rhino 8 tools for architectural drawings: preferences, multi-row dimension chains, batt insulation line.",
     "copyright": "Copyright \u00a9 2026 Manuel Gruber",
     "license": "CC BY-NC 4.0",
     "url": "https://studiogruber.at/",
