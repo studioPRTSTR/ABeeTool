@@ -9,10 +9,14 @@ Rhino 8 tools for architectural drawings.
 | <img src="icons/A01_Pre_Preferences.svg" width="32"> | `A01_Pre_Preferences` | Sets the layer each tool draws on. |
 | <img src="icons/A02_Dim_Dimension.svg" width="32"> | `A02_Dim_Dimension` | Multi-row dimension chains: `80` below 1 m, `1.20` from 1 m. |
 | <img src="icons/A03_BI_BattInsulation.svg" width="32"> | `A03_BI_BattInsulation` | Draws the batt insulation line along a curve. |
+| <img src="icons/ReleaseTheBees.svg" width="32"> | `ReleaseTheBees` | Sets ABeeTool up after installing. Run it once. |
 
 ## Install
 
-Download the `.yak` from [Releases](../../releases) and drag it into Rhino 8, or install `ABeeTool` via `_PackageManager`. Restart Rhino.
+1. Download the `.yak` from [Releases](../../releases) and drag it into Rhino 8, or install `ABeeTool` via `_PackageManager`.
+2. Type `ReleaseTheBees` and press **Enter**. This only has to be done once.
+
+`ReleaseTheBees` loads the plugin, shows its toolbar and turns on the dimension watcher (see the grips tip under [A02_Dim_Dimension](#a02_dim_dimension)), without restarting Rhino. It runs once per installed version: after an update, run it again. Running it a second time does nothing.
 
 ---
 
